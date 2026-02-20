@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Exotel (Buffered) <-> Gemini Live API Bridge
+Exotel (Buffered) <-> AI Live API Bridge
 ============================================
 
-Fixes "Noise/Silence" by enforcing Exotel's chunk size requirements:
+Exotel's chunk size requirements:
 1. Minimum Chunk: 3200 bytes
 2. Alignment: Multiples of 320 bytes
 3. Format: 16-bit PCM, 8kHz
@@ -28,11 +28,11 @@ VOICE_NAME = "Puck"
 # Audio Configuration
 EXOTEL_RATE = 8000
 GEMINI_INPUT_RATE = 16000
-GEMINI_OUTPUT_RATE = 24000 
+GEMINI_OUTPUT_RATE = 24000
 
 # BUFFER SETTINGS (Crucial for Exotel)
 # Requirement: Minimum 3.2k (3200 bytes)
-MIN_CHUNK_SIZE = 3200 
+MIN_CHUNK_SIZE = 3200
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger("BufferedBridge")
@@ -48,9 +48,9 @@ class AudioTranscoder:
         """8k -> 16k"""
         try:
             pcm_16k, self.inbound_state = audioop.ratecv(
-                raw_bytes, 2, 1, 
-                EXOTEL_RATE, 
-                GEMINI_INPUT_RATE, 
+                raw_bytes, 2, 1,
+                EXOTEL_RATE,
+                GEMINI_INPUT_RATE,
                 self.inbound_state
             )
             return pcm_16k
@@ -62,9 +62,9 @@ class AudioTranscoder:
         """24k -> 8k"""
         try:
             pcm_8k, self.outbound_state = audioop.ratecv(
-                pcm_bytes, 2, 1, 
-                GEMINI_OUTPUT_RATE, 
-                EXOTEL_RATE, 
+                pcm_bytes, 2, 1,
+                GEMINI_OUTPUT_RATE,
+                EXOTEL_RATE,
                 self.outbound_state
             )
             return pcm_8k
@@ -90,13 +90,13 @@ class AudioBuffer:
             # Take exactly 3200 bytes (or strict multiple)
             # This ensures we meet the "Minimum chunk size: 3.2k" rule
             chunk = self.buffer[:MIN_CHUNK_SIZE]
-            
+
             # Remove from buffer
             self.buffer = self.buffer[MIN_CHUNK_SIZE:]
-            
+
             # Encode to Base64
             chunks_to_send.append(base64.b64encode(chunk).decode('utf-8'))
-            
+
         return chunks_to_send
 
     def clear(self):
@@ -118,8 +118,19 @@ class BridgeSession:
         try:
             ssl_ctx = ssl.create_default_context()
             self.gemini_ws = await websockets.connect(uri, ssl=ssl_ctx, ping_interval=None)
-            logger.info(f"[{self.id}] Gemini Connected")
-            
+            logger.info(f"[{self.id}] AI Connected")
+
+            system_prompt_text = (
+
+    "आप #ज्ञान-ध्वनि (#Gyan-Dhawani) हैं, एक AI कॉल असिस्टेंट जिसे 'अन्वेषण टीम' (Anveshna Team) ने बनाया है। "
+    "आपसे लोग फोन कॉल के माध्यम से जुड़ेंगे। "
+    "कृपया इन नियमों का सख्ती से पालन करें: "
+    "1. **भाषा**: आपको हिंदी में बात करनी है। अपनी भाषा सरल और स्वाभाविक रखें। "
+    "2. **संक्षिप्तता**: अपने उत्तर बहुत छोटे रखें (1-2 वाक्य)। फोन पर लंबा भाषण न दें ताकि बातचीत निरंतर चलती रहे। "
+    "3. **शैली**: किसी भी प्रकार की लिखित फॉर्मेटिंग (जैसे बुलेट पॉइंट, बोल्ड टेक्स्ट) का उल्लेख न करें। एक इंसान की तरह स्वाभाविक रूप से बोलें। "
+    "4. **व्यवहार**: आपका व्यवहार विनम्र, मददगार और दोस्त जैसा होना चाहिए। "
+    "5. **परिचय**: यदि कोई पूछे कि आपको किसने बनाया है, तो गर्व से 'अन्वेषण टीम' का नाम लें।"
+)
             # Setup
             await self.gemini_ws.send(json.dumps({
                 "setup": {
@@ -133,27 +144,35 @@ class BridgeSession:
                                 }
                             }
                         }
+                    },
+                    # Syetem prompt goes here
+                    "system_instruction": {
+                        "parts": [
+                            {"text": system_prompt_text}
+                        ]
                     }
                 }
             }))
-            
-            # Initial Prompt
+
+            # Initial Trigger to make the bot speak first
+            user_trigger_prompt = "कृपया कॉल शुरू करें। मुझे 'नमस्ते' कहें, अपना परिचय 'ज्ञान-ध्वनि' के रूप में दें और पूछें कि आप मेरी क्या मदद कर सकते हैं।"
+
             await self.gemini_ws.send(json.dumps({
                  "clientContent": {
                      "turns": [{
                          "role": "user",
-                         "parts": [{"text": "Hello. Please greet me briefly."}]
+                         "parts": [{"text": user_trigger_prompt}]
                      }],
                      "turnComplete": True
                  }
             }))
             return True
         except Exception as e:
-            logger.error(f"[{self.id}] Gemini Connection Failed: {e}")
+            logger.error(f"[{self.id}] AI Connection Failed: {e}")
             return False
 
     async def exotel_listener(self):
-        """Phone -> Gemini (No Minimum Size Required for Input)"""
+        """Phone -> AI (No Minimum Size Required for Input)"""
         try:
             async for message in self.exotel_ws:
                 if not self.is_active: break
@@ -165,7 +184,7 @@ class BridgeSession:
                     if self.gemini_ws:
                         raw_in = base64.b64decode(payload)
                         pcm_16k = self.transcoder.exotel_to_gemini(raw_in)
-                        
+
                         if pcm_16k:
                             # Send to Gemini immediately (Gemini handles small chunks fine)
                             b64_out = base64.b64encode(pcm_16k).decode('utf-8')
@@ -190,13 +209,13 @@ class BridgeSession:
             self.is_active = False
 
     async def gemini_listener(self):
-        """Gemini -> Phone (Buffered to 3.2k)"""
+        """AI -> Phone (Buffered to 3.2k)"""
         try:
             async for message in self.gemini_ws:
                 if not self.is_active: break
                 response = json.loads(message)
                 server_content = response.get('serverContent')
-                
+
                 if server_content:
                     # Handle Interruptions
                     if server_content.get('interrupted'):
@@ -206,7 +225,7 @@ class BridgeSession:
                             "event": "clear", "stream_sid": self.stream_sid
                         }))
                         self.transcoder.outbound_state = None
-                    
+
                     # Handle Audio
                     model_turn = server_content.get('modelTurn')
                     if model_turn:
@@ -218,10 +237,10 @@ class BridgeSession:
                                     # 1. Decode & Resample
                                     raw_24k = base64.b64decode(pcm_b64)
                                     raw_8k = self.transcoder.gemini_to_exotel(raw_24k)
-                                    
+
                                     # 2. Add to Buffer & Get valid chunks (3.2k size)
                                     chunks = self.outbound_buffer.add_and_get_chunks(raw_8k)
-                                    
+
                                     # 3. Send valid chunks to Exotel
                                     for chunk_b64 in chunks:
                                         await self.exotel_ws.send(json.dumps({
@@ -233,7 +252,7 @@ class BridgeSession:
                                         await asyncio.sleep(0.001)
 
         except Exception as e:
-            logger.error(f"[{self.id}] Gemini Read Error: {e}")
+            logger.error(f"[{self.id}] AI Read Error: {e}")
             self.is_active = False
 
     async def run(self):
@@ -257,7 +276,7 @@ async def main():
 
 if __name__ == "__main__":
     if not GOOGLE_API_KEY:
-        print("❌ Error: GOOGLE_API_KEY missing")
+        print("❌ Error: AI_KEY missing")
         exit(1)
     try:
         asyncio.run(main())
